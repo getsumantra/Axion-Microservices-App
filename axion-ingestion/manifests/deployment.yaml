@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-deployment
+  namespace: axion-app
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: ingestion-deployment
+
+  template:
+    metadata:
+      labels:
+        app: ingestion-deployment
+
+    spec:
+      containers:
+        - name: ingestion-deployment
+          image: bhawanidocker/axion-ingestion:1.0.0
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8000
+
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://admin:admin123@axion-postgres:5432/axiondb"

@@ -1,0 +1,212 @@
+name: build-pipeline
+
+trigger: none
+  # branches:
+  #   include:
+  #      - main
+
+pool:
+  name: jarvis
+
+parameters:
+- name: environment
+  displayName: Environment
+  type: string
+  default: dev
+  values:
+  - dev
+  - qa
+  - prod
+
+
+variables:
+- group: backend
+- group: subscription_id
+
+- ${{ if eq(parameters.environment, 'dev') }}:
+    - name: sub_id
+      value: $(dev_sub_id)
+
+- ${{ if eq(parameters.environment, 'qa') }}:
+    - name: sub_id
+      value: $(qa_sub_id)
+
+- ${{ if eq(parameters.environment, 'prod') }}:
+    - name: sub_id
+      value: $(prod_sub_id)
+
+- name: service-connection
+  value: "infra-ServiceConnection"
+
+
+- name: workdir
+  value: '$(System.DefaultWorkingDirectory)/env/${{ parameters.environment }}' 
+
+- name: tfstatefile
+  value: "${{ parameters.environment }}.infra-terraform.tfstate"
+
+- name: planFile
+  value: "terraform-${{ parameters.environment }}.tfplan"
+
+- name: artifactName
+  value: "terraform-plan-${{ parameters.environment }}"  
+
+stages:
+- stage: terraform_init_validate
+  displayName: "Terraform init"
+
+  jobs:
+  - job: terraform_init_validate_fmt
+    displayName: "Terraform init validate fmt"
+    steps:
+    - checkout: self
+      displayName: "Checkout Repository"
+
+    
+    - task: TerraformTask@5
+      displayName: "Terraform init"
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(workdir)'
+        backendServiceArm: '$(service-connection)'
+        backendAzureRmResourceGroupName: '$(resource-group)'
+        backendAzureRmStorageAccountName: '$(storage-account)'
+        backendAzureRmContainerName: '$(blob-container)'
+        backendAzureRmKey: '$(tfstatefile)'
+
+    - task: TerraformTask@5
+      displayName: "Terraform Formate"
+      inputs:
+        provider: 'azurerm'
+        command: 'custom'
+        commandOptions: '--recursive'
+        outputTo: 'console'
+        customCommand: 'fmt'
+        environmentServiceNameAzureRM: '$(service-connection)'
+    - task: TerraformTask@5
+      displayName: "Terraform validate"
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(workdir)'
+    
+
+
+- stage: infra_scanning
+  dependsOn: terraform_init_validate
+  displayName: "Security Scanning"
+
+  jobs:
+  - job: security_scanning
+    displayName: "Infra Security Scanning"
+    steps:
+    - checkout: self
+      displayName: "Checkout Repository"
+    - task: PowerShell@2
+      displayName: "TF Lint scan"
+      continueOnError: true
+      inputs:
+        targetType: 'inline'
+        script: |
+          tflint --init
+          tflint --recursive
+    
+    - task: PowerShell@2
+      displayName: "Install and Run tfsec"
+      inputs:
+        targetType: 'inline'
+        script: |
+          $url = "https://github.com/aquasecurity/tfsec/releases/download/v1.26.0/tfsec-windows-amd64.exe"
+          $tfsec = "C:\tool\tfsec.exe"
+
+          Invoke-WebRequest -Uri $url -OutFile $tfsec
+
+          & $tfsec --version
+          & $tfsec "$(workdir)"
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+
+- stage: terraform_plan
+  dependsOn: infra_scanning
+  displayName: "Terraform Plan"
+
+  jobs:
+  - job: terraform_plan
+    displayName: "Terraform init and Plan"
+    steps:
+    - checkout: self
+      displayName: "Checkout Repository"
+    
+    - task: TerraformTask@5
+      displayName: "Terraform init"
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(workdir)'
+        backendServiceArm: '$(service-connection)'
+        backendAzureRmResourceGroupName: '$(resource-group)'
+        backendAzureRmStorageAccountName: '$(storage-account)'
+        backendAzureRmContainerName: '$(blob-container)'
+        backendAzureRmKey: '$(tfstatefile)'
+
+    - task: TerraformTask@5
+      displayName: "Terraform plan"
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(workdir)'
+        commandOptions: '-lock-timeout=5m -out="$(Build.ArtifactStagingDirectory)/$(planFile)"'
+        environmentServiceNameAzureRM: '$(service-connection)'
+      env:
+        TF_VAR_subscription_id: $(sub_id)  
+
+    - task: PublishPipelineArtifact@1
+      displayName: "Publish Terraform Plan Artifact"
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/$(planFile)'
+        artifact: '$(artifactName)'
+        publishLocation: 'pipeline'    
+
+- stage: terraform_apply
+  dependsOn: terraform_plan
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  displayName: "Terraform Apply"
+
+  jobs:
+  - job: terraform_apply
+    displayName: "Terraform init and Apply"
+    steps:
+    - checkout: self
+      displayName: "Checkout Repository"
+    
+    - task: TerraformTask@5
+      displayName: "Terraform init"
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(workdir)'
+        backendServiceArm: '$(service-connection)'
+        backendAzureRmResourceGroupName: '$(resource-group)'
+        backendAzureRmStorageAccountName: '$(storage-account)'
+        backendAzureRmContainerName: '$(blob-container)'
+        backendAzureRmKey: '$(tfstatefile)'
+
+    - task: DownloadPipelineArtifact@2
+      displayName: "Download Terraform Plan Artifact"
+      inputs:
+        buildType: 'current'
+        artifactName: '$(artifactName)'
+        targetPath: '$(Build.ArtifactStagingDirectory)'     
+
+    - task: TerraformTask@5
+      displayName: "Terraform apply"
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(workdir)'
+        commandOptions: '"$(Build.ArtifactStagingDirectory)/$(planFile)"'
+        environmentServiceNameAzureRM: '$(service-connection)'

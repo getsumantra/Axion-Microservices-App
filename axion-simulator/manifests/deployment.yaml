@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulator-deployment
+  namespace: axion-app
+spec:
+  selector:
+    matchLabels:
+      app: simulator-deployment
+  template:
+    metadata:
+      labels:
+        app: simulator-deployment
+    spec:
+      containers:
+      - name: simulator-deployment
+        image: bhawanidocker/axion-data-simulator:1.0.1
+        

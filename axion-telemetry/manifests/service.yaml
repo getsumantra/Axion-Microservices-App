@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-query-service
+  namespace: axion-app
+spec:
+  selector:
+    app: telemetry-query-deployment
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: ClusterIP
